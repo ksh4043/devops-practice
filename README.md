@@ -249,3 +249,73 @@ db와 app은 각각 사용자 정의 이름으로 db는 MySQL, app은 스프링�
 docker compose up --build
 ```
 --build가 추가 된 이유는 그냥 띄우게 되면 변경 사항이 적용되지 않기 때문에 다시 한 번 빌드를 하고 서버를 띄우라는 의미입니다.
+
+## Day 3
+### GitHub Actions와 CI
+GitHub Actions는 보통 개발자가 코드를 올릴 때(push) 정해둔 작업(빌드, 테스트)을 해주는 자동화 도구입니다.
+GitHub Actions는 정해진 위치에 파일이 있어야 인식합니다. 프로젝트 안에 .github/workflows/ 라는 폴더를 만들고, 그 안에 워크플로 파일을 넣어야 합니다.
+따라서, 아래 명령어를 따라 먼저 디렉토리와 파일을 만듭니다.
+
+#### GitHub Actions를 위한 CI 설정
+```bash
+mkdir -p .github/workflows
+code .github/workflows/ci.yml
+```
+
+이제 만든 ci.yml 파일에 GitHub Actions에 할 일을 지정하겠습니다.
+이 프로젝트에서는 main 브랜치에 push 했을 때와 pull request 요청이 생겨도 실행하게 할 것이고, MySQL 서버와 스프링 앱 빌드 테스트를 하도록 작성하겠습니다.
+
+```yml
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_DATABASE: devops
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -prootpassword"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: 코드 가져오기
+        uses: actions/checkout@v4
+
+      - name: JDK 21 설치
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: gradlew 실행 권한 주기
+        run: chmod +x ./gradlew
+
+      - name: 빌드 및 테스트
+        run: ./gradlew build
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/devops
+          SPRING_DATASOURCE_USERNAME: root
+          SPRING_DATASOURCE_PASSWORD: rootpassword
+```
+
+name은 CI로 지정했지만 아무거나 정해도 됩니다.
+on은 언제 이 워크플로우를 실행할지 정하는 부분입니다. 처음 이야기했던 main 브랜치에 push 할 때와 pull request가 생겼을 때 모두 이 워크플로우가 실행됩니다.
+특히 pull request는 합치기 전에 미리 검사하기 위해 넣습니다. 현재는 혼자서 하는 토이 프로젝트이지만 실무에서 좋은 습관입니다.
+jobs는 워크플로우가 할 일들 목록입니다. compose.yaml의 services와 비슷한 위치입니다.
+build 역시 제가 정한 이름입니다. 임의로 정할 수 있습니다.
+runs-on 부분은 GitHub Actions가 구동할 임시 컴퓨터를 결정하는 겁니다. 이 프로젝트에선 최신 버전 ubuntu 리눅스를 골랐습니다.
