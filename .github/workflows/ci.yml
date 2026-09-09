@@ -18,12 +18,12 @@ jobs:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_ROOT_PASSWORD: ${{ secrets.DB_PASSWORD }}
           MYSQL_DATABASE: devops
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h localhost -prootpassword"
+          --health-cmd="mysqladmin ping -h localhost -p${MYSQL_ROOT_PASSWORD}"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
@@ -46,7 +46,7 @@ jobs:
         env:
           SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/devops
           SPRING_DATASOURCE_USERNAME: root
-          SPRING_DATASOURCE_PASSWORD: rootpassword
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
       - name: GHCR 로그인
         uses: docker/login-action@v3
