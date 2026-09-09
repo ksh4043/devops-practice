@@ -319,3 +319,142 @@ on은 언제 이 워크플로우를 실행할지 정하는 부분입니다. 처�
 jobs는 워크플로우가 할 일들 목록입니다. compose.yaml의 services와 비슷한 위치입니다.
 build 역시 제가 정한 이름입니다. 임의로 정할 수 있습니다.
 runs-on 부분은 GitHub Actions가 구동할 임시 컴퓨터를 결정하는 겁니다. 이 프로젝트에선 최신 버전 ubuntu 리눅스를 골랐습니다.
+
+## Day 4
+### CD 설정과 민감 정보 분리, 데이터 영속성
+CI에 이어서 CD(이미지를 저장소에 올리기)를 설정하고, 하드코딩된 비밀번호를 분리하며, 볼륨으로 데이터를 유지시킵니다.
+
+CD는 크게 두 가지로 나뉩니다. 검증된 이미지를 배포 가능한 상태로 저장소에 준비해두는 Continuous Delivery(지속적 전달)와, 실제 서버에 올리는 것까지 자동화하는 Continuous Deployment(지속적 배포)입니다. 이 프로젝트에서는 이미지를 GHCR(GitHub Container Registry)에 올리는 것까지 하므로 Continuous Delivery에 해당합니다.
+
+GHCR은 Docker 이미지를 보관하는 창고(레지스트리)입니다. 이미지를 굽는 곳(CI 서버)과 실행하는 곳(배포 서버)이 서로 다르기 때문에, 구운 이미지를 저장소에 올려두면 어디서든 가져다 쓸 수 있습니다. AWS를 사용하는 실무에서는 이 자리에 보통 ECR을 쓰지만, 로그인 → 굽기 → push라는 흐름은 동일합니다.
+
+### CD 설정 (이미지를 GHCR에 push)
+#### 권한 추가하기
+GHCR에 이미지를 올리려면 쓰기 권한이 필요합니다. ci.yml의 on 블록과 jobs 블록 사이에 아래 내용을 추가합니다.
+
+```yaml
+permissions:
+  contents: read
+  packages: write
+```
+contents: read는 코드를 읽는 권한(코드 가져오기용), packages: write는 패키지(이미지)를 저장소에 올리는 권한입니다. packages: write가 없으면 push 단계에서 권한 없음으로 막힙니다.
+
+#### CD 단계 추가하기
+ci.yml의 steps 맨 아래에 아래 두 단계를 추가합니다.
+
+```yaml
+      - name: GHCR 로그인
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 이미지 굽고 GHCR에 push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+```
+GHCR 로그인 단계는 저장소에 이미지를 올리기 위한 인증입니다.
+username의 ${{ github.actor }}는 워크플로를 실행시킨 사람(push한 사용자)을 자동으로 넣어줍니다.
+password의 ${{ secrets.GITHUB_TOKEN }}은 GitHub Actions가 워크플로가 실행될 때마다 자동으로 발급하는 임시 토큰입니다. 내가 직접 발급하거나 저장해둔 토큰이 아니며, 워크플로가 끝나면 폐기되는 일회용입니다. 덕분에 비밀번호를 직접 파일에 적지 않아도 됩니다.
+
+이미지 굽고 push하는 단계가 CD의 핵심입니다.
+context: .는 현재 디렉토리의 Dockerfile과 코드로 빌드하라는 의미로, docker build .의 점과 같습니다.
+push: true는 이미지를 굽기만 하는 것이 아니라 저장소에 올리라는 의미입니다.
+tags는 이미지에 붙일 이름표입니다. ${{ github.repository }}가 저장소 경로(사용자명/저장소명)를 자동으로 넣어주어, 최종적으로 ghcr.io/사용자명/저장소명:latest 형태가 됩니다.
+
+push하면 CI(빌드/테스트)에 이어 CD(이미지 push)까지 자동으로 실행되고, 저장소 메인 페이지의 Packages 항목에서 올라간 이미지를 확인할 수 있습니다.
+
+### 민감 정보 분리
+지금까지 비밀번호가 여러 파일에 평문(하드코딩)으로 적혀 있었습니다. 실제로는 일회용 테스트 DB의 비밀번호라 위험이 크진 않지만, 실무 습관을 연습하기 위해 코드 밖으로 분리합니다.
+분리 방식은 환경에 따라 다릅니다. 로컬(compose.yaml)은 .env 파일을, GitHub Actions(ci.yml)는 GitHub Secrets를 사용합니다.
+
+#### 로컬 - .env 파일로 분리
+Docker Compose는 프로젝트 루트에 .env 파일이 있으면 자동으로 읽어 ${변수명} 자리에 값을 넣어줍니다.
+
+```bash
+code .env
+```
+
+```
+MYSQL_ROOT_PASSWORD=rootpassword
+MYSQL_DATABASE=devops
+SPRING_DATASOURCE_PASSWORD=rootpassword
+```
+
+compose.yaml에서 평문 값을 참조로 바꿉니다.
+
+```yaml
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+```
+healthcheck의 -prootpassword도 -p${MYSQL_ROOT_PASSWORD}로 바꿔 일관성을 맞춥니다. (-p와 값은 반드시 붙여 씁니다.)
+
+가장 중요한 단계는 .env를 gitignore에 넣는 것입니다. 이걸 하지 않으면 비밀번호가 그대로 저장소에 올라가 분리한 의미가 없어집니다.
+```bash
+echo ".env" >> .gitignore
+```
+
+대신 .env.example이라는 양식 파일을 만들어 올립니다. 값은 비우거나 기본값만 채워, 나중에 이 프로젝트를 받는 사람이 어떤 변수가 필요한지 알 수 있게 합니다. 이 파일은 gitignore하지 않습니다.
+```bash
+code .env.example
+```
+
+```
+MYSQL_ROOT_PASSWORD=
+MYSQL_DATABASE=devops
+SPRING_DATASOURCE_PASSWORD=
+```
+
+#### GitHub Actions - Secrets로 분리
+GitHub Secrets는 GitHub Actions용 금고입니다. .env가 로컬용 금고라면, Secrets는 GitHub 서버에 암호화되어 저장됩니다.
+
+저장소의 Settings → Secrets and variables → Actions → New repository secret에서 secret을 등록합니다.
+- Name: DB_PASSWORD
+- Secret: rootpassword
+
+ci.yml에서 평문 비밀번호를 참조로 바꿉니다. MySQL 서비스, healthcheck, 빌드/테스트 단계 세 곳 모두 같은 secret을 참조하게 합니다.
+
+```yaml
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          MYSQL_DATABASE: devops
+```
+```yaml
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -p${{ secrets.DB_PASSWORD }}"
+```
+```yaml
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/devops
+          SPRING_DATASOURCE_USERNAME: root
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
+```
+${{ secrets.DB_PASSWORD }}는 GitHub 금고에서 해당 secret을 가져와 넣으라는 의미입니다. CD에서 쓴 ${{ secrets.GITHUB_TOKEN }}과 문법은 같고, GITHUB_TOKEN은 자동 발급, DB_PASSWORD는 내가 직접 등록했다는 점만 다릅니다.
+
+참고로 .env는 ${변수명}(중괄호 한 겹), GitHub Actions는 ${{ ... }}(중괄호 두 겹)를 씁니다. 서로 다른 도구가 각자의 문법을 쓰는 것이며, 두 겹 중괄호는 GitHub Actions의 표현식(expression) 문법으로 secrets, github 정보 등을 실행 시점에 계산해 넣습니다.
+
+### 데이터 영속성 (볼륨)
+docker compose down은 상자를 멈추는 것이 아니라 삭제합니다. MySQL 데이터가 상자 안에 저장되어 있었기 때문에, down을 하면 데이터가 함께 사라져 방문 횟수가 리셋됩니다. (restart는 상자를 살려둔 채 재시작이라 데이터가 유지되지만, down은 상자 자체를 삭제하기 때문입니다.)
+이를 해결하기 위해 볼륨을 사용합니다. 볼륨은 상자가 삭제돼도 살아남는 별도의 저장 공간입니다.
+
+compose.yaml 맨 아래에 볼륨을 선언합니다.
+```yaml
+volumes:
+  db_data:
+```
+volumes는 services와 같은 최상위 항목이고, db_data는 사용자 정의 볼륨 이름입니다.
+
+db 서비스가 이 볼륨을 사용하도록 연결합니다.
+```yaml
+    volumes:
+      - db_data:/var/lib/mysql
+```
+볼륨이름:상자안경로 형태로, 포트 설정의 바깥:안쪽과 비슷한 구조입니다.
+/var/lib/mysql은 MySQL이 상자 안에서 데이터를 저장하는 경로입니다. 이 경로를 상자 바깥의 db_data 볼륨에 연결하면, MySQL이 저장하는 데이터가 볼륨에 쌓여 상자를 삭제해도 유지됩니다.
+
+이제 docker compose down 후 다시 up 해도 방문 횟수가 유지됩니다. Day 2에서 확인한 데이터 유지가 restart뿐 아니라 down에도 견디도록 완성된 것입니다.
